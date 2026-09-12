@@ -25,7 +25,8 @@ elements of the NiPreps chart SVG file.
 
 Example usage:
 
-    python {script} input.svg output.svg project_links.json
+    python {script} input.svg project_links.json output.svg
+    python {script} input.svg project_links.json --check
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.request import urlopen
@@ -319,6 +321,44 @@ def insert_links(tree: ET.ElementTree, mapping: dict[str, str]) -> int:
     return inserted
 
 
+def check_links(tree: ET.ElementTree, mapping: dict[str, str]) -> int:
+    """Check SVG tree for missing elements or unlinked labels based on mapping
+
+    Prints warnings for mapping labels that do not exist anywhere in the SVG,
+    and returns a list of labels that exist in the SVG but currently lack a link.
+
+    Parameters
+    ----------
+    tree : :obj:`~ET.ElementTree`
+        Parsed SVG tree to check.
+    mapping : :obj:`dict[str, str]`
+        Label-to-URL mapping used to check links.
+
+    Returns
+    -------
+    :obj:`int`
+        Number of missing links that need to be inserted.
+    """
+    root = tree.getroot()
+    unlinked_labels = []
+    matched_labels = set()
+
+    for text_node in root.findall(".//svg:text", NS):
+        label = normalize("".join(text_node.itertext()))
+        if label in mapping:
+            matched_labels.add(label)
+            target = determine_best_click_target(root, text_node)
+            if not already_linked(target, root):
+                unlinked_labels.append(label)
+
+    # Print labels that do not exist in the SVG at all
+    not_found = sorted(set(mapping) - matched_labels)
+    if not_found:
+        print(f"Warning: labels not found in SVG: {', '.join(not_found)}")
+
+    return unlinked_labels
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build argument parser for command-line interface.
 
@@ -331,8 +371,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("input", help="Input SVG file path or URL", type=Path)
-    parser.add_argument("output", help="Output SVG file path", type=Path)
     parser.add_argument("mapping",  help = "Path to mapping file (.json)", type=Path)
+    parser.add_argument("output", help="Output SVG file path", type=Path, nargs="?")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check if all project links are present without writing output (exits with 1 if missing)",
+    )
     return parser
 
 
@@ -358,12 +403,24 @@ def main() -> None:
 
     mapping = load_mapping(args.mapping)
     tree = parse_svg(str(args.input))
-    count = insert_links(tree, mapping)
 
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tree.write(out, encoding="utf-8", xml_declaration=True)
-    print(f"Inserted {count} link(s) into {out}")
+    if args.check:
+        unlinked_labels = check_links(tree, mapping)
+        unlinked_count = len(unlinked_labels)
+        print(f"Check found {unlinked_count} projects missing link(s):")
+        print(f"{unlinked_labels}")
+        if unlinked_count > 0:
+            sys.exit(1)
+        else:
+            print("All project links are present.")
+            sys.exit(0)
+    else:
+        count = insert_links(tree, mapping)
+        # Default to in-place editing if output wasn't provided
+        out = Path(args.output if args.output else args.input)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tree.write(out, encoding="utf-8", xml_declaration=True)
+        print(f"Inserted {count} link(s) into {out}")
 
 
 if __name__ == "__main__":
